@@ -1,0 +1,198 @@
+{
+  "name": "Task2 – HackerNews Morning Brief",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 1 }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule Trigger (Every 1h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://hacker-news.firebaseio.com/v0/topstories.json",
+        "options": {}
+      },
+      "id": "node-hn-top",
+      "name": "HN – Get Top Story IDs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 300],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Grab first 5 story IDs from the array\nconst ids = $input.first().json.slice(0, 5);\nreturn ids.map(id => ({ json: { id } }));"
+      },
+      "id": "node-transform",
+      "name": "Transform – Top 5 IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://hacker-news.firebaseio.com/v0/item/{{ $json.id }}.json",
+        "options": {}
+      },
+      "id": "node-hn-story",
+      "name": "HN – Fetch Each Story",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-score",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": 100,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if",
+      "name": "IF – Score > 100",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://hn.algolia.com/api/v1/search?tags=story&query={{ encodeURIComponent($json.title) }}&hitsPerPage=1",
+        "options": {}
+      },
+      "id": "node-enrich-high",
+      "name": "Enrich – Algolia Details (High Score)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 160],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine original story data with algolia enrichment\nconst story = $('IF – Score > 100').first().json;\nconst algolia = $input.first().json.hits?.[0] || {};\nreturn [{\n  json: {\n    title: story.title,\n    url: story.url || `https://news.ycombinator.com/item?id=${story.id}`,\n    score: story.score,\n    author: story.by,\n    comments: story.descendants || 0,\n    algolia_points: algolia.points || story.score,\n    tier: 'HIGH'\n  }\n}];"
+      },
+      "id": "node-merge-high",
+      "name": "Merge – High Score Story",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 160]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Low-score stories: pass through with tier label\nconst story = $input.first().json;\nreturn [{\n  json: {\n    title: story.title || 'Unknown',\n    url: story.url || `https://news.ycombinator.com/item?id=${story.id}`,\n    score: story.score || 0,\n    author: story.by || 'unknown',\n    comments: story.descendants || 0,\n    tier: 'NORMAL'\n  }\n}];"
+      },
+      "id": "node-merge-low",
+      "name": "Label – Normal Score Story",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 440]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate all items from both branches into a single Discord message\nconst allItems = $input.all();\nconst now = new Date().toUTCString();\n\nlet lines = allItems.map((item, i) => {\n  const d = item.json;\n  const badge = d.tier === 'HIGH' ? '🔥' : '📰';\n  return `${badge} **${i+1}. ${d.title}**\\n   Score: ${d.score} | By: ${d.author} | 💬 ${d.comments} comments\\n   🔗 ${d.url}`;\n}).join('\\n\\n');\n\nconst message = `📡 **HackerNews Morning Brief** — ${now}\\n\\n${lines}\\n\\n_Delivered by n8n automation | Stories with 🔥 score > 100_`;\nreturn [{ json: { message } }];"
+      },
+      "id": "node-build-digest",
+      "name": "Build – Discord Digest Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "content": "={{ $json.message }}"
+        },
+        "options": {}
+      },
+      "id": "node-discord",
+      "name": "Discord – Post Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 300],
+      "credentials": { "httpCustomAuth": { "id": "cred-discord", "name": "Discord Webhook" } },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error handler: log details about which node failed\nconst err = $input.first();\nconst ts = new Date().toISOString();\nconsole.log(`[ERROR ${ts}] Node: ${err.json.node || 'unknown'} | Message: ${err.json.message || 'no message'}`);\nreturn [{ json: { error: true, logged_at: ts, detail: err.json } }];"
+      },
+      "id": "node-error-handler",
+      "name": "Error Handler – Log & Continue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 560]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (Every 1h)": {
+      "main": [[{ "node": "HN – Get Top Story IDs", "type": "main", "index": 0 }]]
+    },
+    "HN – Get Top Story IDs": {
+      "main": [
+        [{ "node": "Transform – Top 5 IDs", "type": "main", "index": 0 }],
+        [{ "node": "Error Handler – Log & Continue", "type": "main", "index": 0 }]
+      ]
+    },
+    "Transform – Top 5 IDs": {
+      "main": [[{ "node": "HN – Fetch Each Story", "type": "main", "index": 0 }]]
+    },
+    "HN – Fetch Each Story": {
+      "main": [
+        [{ "node": "IF – Score > 100", "type": "main", "index": 0 }],
+        [{ "node": "Error Handler – Log & Continue", "type": "main", "index": 0 }]
+      ]
+    },
+    "IF – Score > 100": {
+      "main": [
+        [{ "node": "Enrich – Algolia Details (High Score)", "type": "main", "index": 0 }],
+        [{ "node": "Label – Normal Score Story", "type": "main", "index": 0 }]
+      ]
+    },
+    "Enrich – Algolia Details (High Score)": {
+      "main": [
+        [{ "node": "Merge – High Score Story", "type": "main", "index": 0 }],
+        [{ "node": "Error Handler – Log & Continue", "type": "main", "index": 0 }]
+      ]
+    },
+    "Merge – High Score Story": {
+      "main": [[{ "node": "Build – Discord Digest Message", "type": "main", "index": 0 }]]
+    },
+    "Label – Normal Score Story": {
+      "main": [[{ "node": "Build – Discord Digest Message", "type": "main", "index": 0 }]]
+    },
+    "Build – Discord Digest Message": {
+      "main": [[{ "node": "Discord – Post Digest", "type": "main", "index": 0 }]]
+    },
+    "Discord – Post Digest": {
+      "main": [
+        [],
+        [{ "node": "Error Handler – Log & Continue", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2025-05-26T00:00:00.000Z",
+  "versionId": "1"
+}
